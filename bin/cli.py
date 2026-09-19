@@ -2,6 +2,7 @@
 
 import argparse
 from datetime import datetime, timezone
+import html
 import ipaddress
 import json
 import os
@@ -148,6 +149,25 @@ def is_ipv6(value: str) -> bool:
         return False
 
 
+def looks_like_ipv6_fragment(value: str) -> bool:
+    """Loosely match IPv6-shaped input (e.g. truncated/partial addresses)
+    without accepting unrelated colon-hex strings such as MAC addresses or
+    HH:MM:SS timestamps, which is_ipv6() correctly rejects."""
+    group_re = re.compile(r"^[A-Fa-f0-9]{1,4}$")
+    if "::" in value:
+        if value.count("::") != 1:
+            return False
+        left, right = value.split("::", 1)
+        groups = [g for g in (left.split(":") if left else []) + (right.split(":") if right else [])]
+        if len(groups) > 7:
+            return False
+        return all(group_re.match(g) for g in groups)
+    groups = value.split(":")
+    if len(groups) != 8:
+        return False
+    return all(group_re.match(g) for g in groups)
+
+
 def looks_like_domain(value: str) -> bool:
     if len(value) > 253 or " " in value or "/" in value or "@" in value:
         return False
@@ -291,7 +311,7 @@ def guess_attribute_types(value: str, valid_types: set[str], supported_input_typ
         add("domain", "looks like a domain name", 85)
         add("hostname", "looks like a hostname", 80)
 
-    if re.match(r"^[A-Fa-f0-9:]+$", v) and ":" in v:
+    if looks_like_ipv6_fragment(v):
         add("ip-src", "contains ':' and resembles IPv6", 50)
         add("ip-dst", "contains ':' and resembles IPv6", 50)
 
@@ -364,7 +384,7 @@ def format_markdown_output(
     records: List[Dict[str, Any]]
 ) -> str:
     def scalar_to_text(value: Any) -> str:
-        return str(value)
+        return html.escape(str(value))
 
     def format_nested_value(value: Any, indent_level: int = 0) -> List[str]:
         indent_prefix = "&nbsp;" * (indent_level * 2)
@@ -376,10 +396,10 @@ def format_markdown_output(
                 child = value[key]
                 if isinstance(child, (dict, list)):
                     nested = format_nested_value(child, indent_level + 1)
-                    lines.append(f"{indent_prefix}{key}:")
+                    lines.append(f"{indent_prefix}{scalar_to_text(key)}:")
                     lines.extend(nested)
                 else:
-                    lines.append(f"{indent_prefix}{key}: {scalar_to_text(child)}")
+                    lines.append(f"{indent_prefix}{scalar_to_text(key)}: {scalar_to_text(child)}")
             return lines
         if isinstance(value, list):
             if not value:
@@ -398,7 +418,7 @@ def format_markdown_output(
     def to_inline(value: Any) -> str:
         if isinstance(value, (dict, list)):
             return "<br>".join(format_nested_value(value))
-        return str(value)
+        return scalar_to_text(value)
 
     def response_to_table(response: Any) -> List[str]:
         if isinstance(response, dict):
@@ -406,7 +426,7 @@ def format_markdown_output(
                 return ["| Key | Value |", "| --- | --- |", "| _(empty)_ |  |"]
             lines = ["| Key | Value |", "| --- | --- |"]
             for key in sorted(response.keys()):
-                safe_key = str(key).replace("\n", " ").replace("\\", "\\\\").replace("|", "\\|")
+                safe_key = scalar_to_text(key).replace("\n", " ").replace("\\", "\\\\").replace("|", "\\|")
                 safe_value = to_inline(response[key]).replace("\n", " ").replace("\\", "\\\\").replace("|", "\\|")
                 lines.append(f"| `{safe_key}` | {safe_value} |")
             return lines
@@ -418,7 +438,7 @@ def format_markdown_output(
                 safe_value = to_inline(item).replace("\n", " ").replace("\\", "\\\\").replace("|", "\\|")
                 lines.append(f"| `{idx}` | {safe_value} |")
             return lines
-        safe_value = str(response).replace("\n", " ").replace("\\", "\\\\").replace("|", "\\|")
+        safe_value = scalar_to_text(response).replace("\n", " ").replace("\\", "\\\\").replace("|", "\\|")
         return ["| Value |", "| --- |", f"| `{safe_value}` |"]
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
@@ -440,10 +460,10 @@ def format_markdown_output(
         "## Summary",
         "",
         f"- Generated at (UTC): `{generated_at}`",
-        f"- Input value: `{input_value}`",
-        f"- Explicit type: `{explicit_type or 'auto-guessed'}`",
+        f"- Input value: `{html.escape(input_value)}`",
+        f"- Explicit type: `{html.escape(explicit_type) if explicit_type else 'auto-guessed'}`",
         f"- Query all guesses: `{all_guesses}`",
-        f"- Selected modules filter: `{', '.join(selected_modules) if selected_modules else 'none'}`",
+        f"- Selected modules filter: `{html.escape(', '.join(selected_modules)) if selected_modules else 'none'}`",
         f"- Total module query attempts: `{len(records)}`",
         f"- Successful queries: `{success_count}`",
         f"- Failed queries: `{failed_count}`",
@@ -462,12 +482,12 @@ def format_markdown_output(
 
     for idx, record in enumerate(records, start=1):
         lines.extend([
-            f"### {idx}. Module `{record.get('module', '<unknown>')}` / Type `{record.get('attribute_type', '<unknown>')}`",
+            f"### {idx}. Module `{html.escape(str(record.get('module', '<unknown>')))}` / Type `{html.escape(str(record.get('attribute_type', '<unknown>')))}`",
             "",
-            f"- Status: `{record.get('status', 'unknown')}`",
-            f"- Query reason: `{record.get('reason', 'n/a')}`",
-            f"- Queried at (UTC): `{record.get('queried_at', 'n/a')}`",
-            f"- Cache: `{record.get('cache', 'n/a')}`",
+            f"- Status: `{html.escape(str(record.get('status', 'unknown')))}`",
+            f"- Query reason: `{html.escape(str(record.get('reason', 'n/a')))}`",
+            f"- Queried at (UTC): `{html.escape(str(record.get('queried_at', 'n/a')))}`",
+            f"- Cache: `{html.escape(str(record.get('cache', 'n/a')))}`",
             "",
             "#### Query Parameters",
             "",
@@ -576,8 +596,9 @@ def load_config(config_path: str) -> Dict[str, Any]:
 def save_config(config_path: str, config: Dict[str, Any]) -> None:
     config_dir = os.path.dirname(config_path)
     if config_dir:
-        os.makedirs(config_dir, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
+        os.makedirs(config_dir, mode=0o700, exist_ok=True)
+    fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, sort_keys=True)
         f.write("\n")
 
@@ -611,8 +632,9 @@ def load_cache(cache_path: str) -> Dict[str, Any]:
 def save_cache(cache_path: str, cache: Dict[str, Any]) -> None:
     cache_dir = os.path.dirname(cache_path)
     if cache_dir:
-        os.makedirs(cache_dir, exist_ok=True)
-    with open(cache_path, "w", encoding="utf-8") as f:
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+    fd = os.open(cache_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, sort_keys=True)
         f.write("\n")
 
